@@ -9,13 +9,14 @@ from playwright.sync_api import sync_playwright
 import openpyxl
 from openpyxl import Workbook
 
-SCREENSHOT_DIR = r"C:\Users\12824\Desktop\dataLabel\0319\p13\login_picture"
 EXCEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "register_data.xlsx")
+VALIDATION_EXCEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "validation_results.xlsx")
 
 FIRST_NAMES = ["张", "王", "李", "赵", "刘", "陈", "杨", "黄", "周", "吴", "徐", "孙", "马", "朱", "胡", "郭", "何", "高", "林", "罗"]
 LAST_NAMES = ["伟", "芳", "娜", "秀英", "敏", "静", "丽", "强", "磊", "军", "洋", "勇", "艳", "杰", "娟", "涛", "明", "超", "秀兰", "霞"]
 
 excel_lock = threading.Lock()
+validation_excel_lock = threading.Lock()
 
 def generate_random_string(length=8):
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
@@ -44,21 +45,39 @@ def generate_random_phone():
     suffix = ''.join(random.choices(string.digits, k=8))
     return prefix + suffix
 
-def ensure_screenshot_dir():
-    if not os.path.exists(SCREENSHOT_DIR):
-        os.makedirs(SCREENSHOT_DIR)
-        print(f"创建截图目录: {SCREENSHOT_DIR}")
+def generate_validation_test_cases():
+    test_cases = []
+    long_string = 'a' * 100
+    special_chars = '!@#$%^&*()_+-=[]{}|;:,.<>?`~'
+    test_cases.append({"type": "空字段", "value": ""})
+    test_cases.append({"type": "100字符长字段", "value": long_string})
+    test_cases.append({"type": "纯数字", "value": "1234567890"})
+    test_cases.append({"type": "非数字", "value": "abcdefghij"})
+    test_cases.append({"type": "特殊符号", "value": special_chars})
+    test_cases.append({"type": "数字+字母+特殊符号", "value": "abc123!@#"})
+    return test_cases
 
 def init_excel():
     if not os.path.exists(EXCEL_FILE):
         wb = Workbook()
         ws = wb.active
         ws.title = "注册数据"
-        headers = ["序号", "用户名", "密码", "邮箱", "姓名", "年龄", "手机号", "注册开始时间", "注册结束时间", "注册耗时(秒)", "登录开始时间", "登录结束时间", "登录耗时(秒)", "总耗时(秒)", "注册状态", "登录状态", "验证状态"]
+        headers = ["序号", "用户名", "密码", "邮箱", "姓名", "年龄", "手机号", "注册开始时间", "注册结束时间", "注册耗时(秒)", "注册状态", "登录状态", "验证状态"]
         ws.append(headers)
         wb.save(EXCEL_FILE)
         print(f"创建Excel文件: {EXCEL_FILE}")
     return EXCEL_FILE
+
+def init_validation_excel():
+    if not os.path.exists(VALIDATION_EXCEL_FILE):
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "字段验证结果"
+        headers = ["序号", "要修改字段", "当前账号", "原字段值", "目标修改值", "测试类型", "接口返回结果", "验证时间"]
+        ws.append(headers)
+        wb.save(VALIDATION_EXCEL_FILE)
+        print(f"创建验证结果Excel文件: {VALIDATION_EXCEL_FILE}")
+    return VALIDATION_EXCEL_FILE
 
 def save_to_excel(data):
     with excel_lock:
@@ -66,6 +85,13 @@ def save_to_excel(data):
         ws = wb.active
         ws.append(data)
         wb.save(EXCEL_FILE)
+
+def save_validation_result(data):
+    with validation_excel_lock:
+        wb = openpyxl.load_workbook(VALIDATION_EXCEL_FILE)
+        ws = wb.active
+        ws.append(data)
+        wb.save(VALIDATION_EXCEL_FILE)
 
 def find_input(page, selectors, field_name):
     for selector in selectors:
@@ -207,10 +233,6 @@ def perform_register(page, user_data, task_id):
     register_end_time = datetime.now()
     register_duration = (register_end_time - register_start_time).total_seconds()
     
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    screenshot_path = os.path.join(SCREENSHOT_DIR, f"task{task_id}_register_{timestamp}.png")
-    page.screenshot(path=screenshot_path)
-    
     return {
         "register_start_time": register_start_time,
         "register_end_time": register_end_time,
@@ -221,8 +243,6 @@ def perform_register(page, user_data, task_id):
 def perform_login(page, user_data, task_id):
     username = user_data["username"]
     password = user_data["password"]
-    
-    login_start_time = datetime.now()
     
     print(f"[任务{task_id}] 跳转到登录页面...")
     
@@ -327,29 +347,128 @@ def perform_login(page, user_data, task_id):
         if verify_status != "验证成功":
             verify_status = "验证失败"
     
-    login_end_time = datetime.now()
-    login_duration = (login_end_time - login_start_time).total_seconds()
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    screenshot_path = os.path.join(SCREENSHOT_DIR, f"task{task_id}_login_{timestamp}.png")
-    page.screenshot(path=screenshot_path)
-    
     return {
-        "login_start_time": login_start_time,
-        "login_end_time": login_end_time,
-        "login_duration": login_duration,
         "login_status": login_status,
         "verify_status": verify_status
     }
 
-def single_task(task_id, user_data):
+def test_backend_validation_via_register_api(page, username, task_id, validation_counter):
+    print(f"[任务{task_id}] 通过注册API测试后端字段校验...")
+    
+    base_user = {
+        "account": username,
+        "name": "正常用户",
+        "age": 25,
+        "password": "Test123456",
+        "phone": "13800138000",
+        "email": username + "@test.com"
+    }
+    
+    test_scenarios = [
+        {"field": "account", "field_cn": "账号", "test_type": "空字段", "modify": {"account": ""}},
+        {"field": "account", "field_cn": "账号", "test_type": "100字符长字段", "modify": {"account": "x" * 100}},
+        {"field": "account", "field_cn": "账号", "test_type": "特殊符号", "modify": {"account": "!@#$%^&*()"}},
+        
+        {"field": "name", "field_cn": "姓名", "test_type": "空字段", "modify": {"name": ""}},
+        {"field": "name", "field_cn": "姓名", "test_type": "100字符长字段", "modify": {"name": "n" * 100}},
+        {"field": "name", "field_cn": "姓名", "test_type": "特殊符号", "modify": {"name": "!@#$%^&*()"}},
+        {"field": "name", "field_cn": "姓名", "test_type": "纯数字", "modify": {"name": "1234567890"}},
+        
+        {"field": "age", "field_cn": "年龄", "test_type": "空字段", "modify": {"age": ""}},
+        {"field": "age", "field_cn": "年龄", "test_type": "非数字(字母)", "modify": {"age": "abcdef"}},
+        {"field": "age", "field_cn": "年龄", "test_type": "特殊符号", "modify": {"age": "!@#$%"}},
+        {"field": "age", "field_cn": "年龄", "test_type": "超大数字", "modify": {"age": 999999}},
+        {"field": "age", "field_cn": "年龄", "test_type": "负数", "modify": {"age": -10}},
+        
+        {"field": "password", "field_cn": "密码", "test_type": "空字段", "modify": {"password": ""}},
+        {"field": "password", "field_cn": "密码", "test_type": "100字符长字段", "modify": {"password": "p" * 100}},
+        
+        {"field": "phone", "field_cn": "手机号", "test_type": "空字段", "modify": {"phone": ""}},
+        {"field": "phone", "field_cn": "手机号", "test_type": "100字符长字段", "modify": {"phone": "1" * 100}},
+        {"field": "phone", "field_cn": "手机号", "test_type": "非数字", "modify": {"phone": "abcdefghij"}},
+        {"field": "phone", "field_cn": "手机号", "test_type": "特殊符号", "modify": {"phone": "!@#$%^&*()"}},
+        
+        {"field": "email", "field_cn": "邮箱", "test_type": "空字段", "modify": {"email": ""}},
+        {"field": "email", "field_cn": "邮箱", "test_type": "100字符长字段", "modify": {"email": ("e" * 90) + "@test.com"}},
+        {"field": "email", "field_cn": "邮箱", "test_type": "非法邮箱格式", "modify": {"email": "not-a-valid-email"}},
+        {"field": "email", "field_cn": "邮箱", "test_type": "特殊符号", "modify": {"email": "!@#$%^&*()"}},
+    ]
+    
+    for scenario in test_scenarios:
+        test_data = dict(base_user)
+        test_data.update(scenario["modify"])
+        test_data["account"] = test_data["account"] + "_v" + str(validation_counter[0])
+        
+        field_name = scenario["field_cn"]
+        test_type = scenario["test_type"]
+        
+        modified_fields = list(scenario["modify"].keys())
+        display_value = str(scenario["modify"].get(modified_fields[0], ""))
+        if len(display_value) > 50:
+            display_value = display_value[:50] + "..."
+        
+        print(f"[任务{task_id}] 测试: {field_name} - {test_type}, 值: {repr(display_value)}")
+        
+        try:
+            result = page.evaluate("""
+            (data) => {
+                return fetch('http://39.107.109.8:8082/api/user/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                }).then(r => r.json().then(j => ({status: r.status, body: j})))
+            }
+            """, test_data)
+            
+            api_result = f"HTTP状态: {result['status']}, 返回: {result['body'].get('message', '无消息')}"
+            
+            if result['status'] == 200:
+                backend_check = "后端未拦截"
+            else:
+                backend_check = "后端已拦截校验"
+            
+            print(f"[任务{task_id}]   -> {backend_check}, {api_result}")
+            
+            validation_counter[0] += 1
+            validation_data = [
+                validation_counter[0],
+                field_name,
+                test_data["account"],
+                f"正常{field_name}值",
+                display_value if display_value else "(空字符串)",
+                test_type,
+                api_result + f" ({backend_check})",
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            ]
+            save_validation_result(validation_data)
+            
+        except Exception as e:
+            print(f"[任务{task_id}]   -> 请求失败: {e}")
+            validation_counter[0] += 1
+            validation_data = [
+                validation_counter[0],
+                field_name,
+                test_data["account"],
+                f"正常{field_name}值",
+                display_value if display_value else "(空字符串)",
+                test_type,
+                f"请求失败: {str(e)}",
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            ]
+            save_validation_result(validation_data)
+        
+        page.wait_for_timeout(300)
+    
+    print(f"[任务{task_id}] 后端字段校验测试完成!")
+
+def single_task(task_id, user_data, validation_counter):
     print(f"\n[任务{task_id}] 开始执行...")
     print(f"[任务{task_id}] 用户名: {user_data['username']}")
     
     task_start_time = datetime.now()
     
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
+        browser = p.chromium.launch(headless=True)
         context = browser.new_context()
         page = context.new_page()
         
@@ -372,6 +491,8 @@ def single_task(task_id, user_data):
             
             login_result = perform_login(page, user_data, task_id)
             
+            test_backend_validation_via_register_api(page, user_data["username"], task_id, validation_counter)
+            
             task_end_time = datetime.now()
             total_duration = (task_end_time - task_start_time).total_seconds()
             
@@ -386,10 +507,6 @@ def single_task(task_id, user_data):
                 register_result["register_start_time"].strftime("%Y-%m-%d %H:%M:%S"),
                 register_result["register_end_time"].strftime("%Y-%m-%d %H:%M:%S"),
                 round(register_result["register_duration"], 2),
-                login_result["login_start_time"].strftime("%Y-%m-%d %H:%M:%S"),
-                login_result["login_end_time"].strftime("%Y-%m-%d %H:%M:%S"),
-                round(login_result["login_duration"], 2),
-                round(total_duration, 2),
                 register_result["register_status"],
                 login_result["login_status"],
                 login_result["verify_status"]
@@ -401,7 +518,6 @@ def single_task(task_id, user_data):
             print(f"[任务{task_id}] 注册状态: {register_result['register_status']}")
             print(f"[任务{task_id}] 注册耗时: {register_result['register_duration']:.2f}秒")
             print(f"[任务{task_id}] 登录状态: {login_result['login_status']}")
-            print(f"[任务{task_id}] 登录耗时: {login_result['login_duration']:.2f}秒")
             print(f"[任务{task_id}] 验证状态: {login_result['verify_status']}")
             print(f"[任务{task_id}] 总耗时: {total_duration:.2f}秒")
             print(f"[任务{task_id}] ==============================\n")
@@ -417,12 +533,6 @@ def single_task(task_id, user_data):
             
         except Exception as e:
             print(f"[任务{task_id}] 发生错误: {e}")
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            error_screenshot = os.path.join(SCREENSHOT_DIR, f"task{task_id}_error_{timestamp}.png")
-            try:
-                page.screenshot(path=error_screenshot)
-            except:
-                pass
             
             return {
                 "task_id": task_id,
@@ -442,12 +552,12 @@ def generate_user_data():
         "phone": generate_random_phone()
     }
 
-def run_parallel_register(num_tasks=5):
-    ensure_screenshot_dir()
+def run_parallel_register(num_tasks=2):
     init_excel()
+    init_validation_excel()
     
     print("=" * 60)
-    print(f"开始并行执行 {num_tasks} 个注册任务")
+    print(f"开始执行 {num_tasks} 个注册+字段验证任务 (无头浏览器)")
     print("=" * 60)
     
     overall_start_time = datetime.now()
@@ -459,18 +569,12 @@ def run_parallel_register(num_tasks=5):
         print(f"  任务{i}: {user['username']}")
     
     results = []
+    validation_counter = [0]
     
-    with ThreadPoolExecutor(max_workers=num_tasks) as executor:
-        futures = {executor.submit(single_task, i+1, user): i+1 for i, user in enumerate(users_data)}
-        
-        for future in as_completed(futures):
-            task_id = futures[future]
-            try:
-                result = future.result()
-                results.append(result)
-            except Exception as e:
-                print(f"任务{task_id}执行异常: {e}")
-                results.append({"task_id": task_id, "status": "异常", "error": str(e)})
+    print("\n注意: 使用顺序执行以避免验证计数器冲突")
+    for i, user in enumerate(users_data, 1):
+        result = single_task(i, user, validation_counter)
+        results.append(result)
     
     overall_end_time = datetime.now()
     overall_duration = (overall_end_time - overall_start_time).total_seconds()
@@ -486,13 +590,14 @@ def run_parallel_register(num_tasks=5):
     print(f"  总任务数: {num_tasks}")
     print(f"  成功: {success_count}")
     print(f"  失败: {fail_count}")
+    print(f"  字段验证数: {validation_counter[0]}")
     print(f"  总耗时: {overall_duration:.2f}秒")
     print(f"  平均耗时: {overall_duration/num_tasks:.2f}秒/任务")
     
-    print(f"\n数据已保存到: {EXCEL_FILE}")
-    print(f"截图已保存到: {SCREENSHOT_DIR}")
+    print(f"\n注册数据已保存到: {EXCEL_FILE}")
+    print(f"验证结果已保存到: {VALIDATION_EXCEL_FILE}")
     
     return results
 
 if __name__ == "__main__":
-    results = run_parallel_register(5)
+    results = run_parallel_register(2)
